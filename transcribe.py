@@ -1,120 +1,141 @@
 #!/usr/bin/env python3
-"""Simple audio transcription using the Gemini API."""
+"""Orchestrate audio/video transcription: extract → trim silence → transcribe via Gemini API."""
 
 import argparse
-import io
-import mimetypes
-import os
 import sys
+import tempfile
 from pathlib import Path
 
-from dotenv import load_dotenv
-from google import genai
-
-SUPPORTED_AUDIO_TYPES = {
-    ".mp3": "audio/mp3",
-    ".wav": "audio/wav",
-    ".flac": "audio/flac",
-    ".ogg": "audio/ogg",
-    ".m4a": "audio/mp4",
-    ".aac": "audio/aac",
-    ".wma": "audio/x-ms-wma",
-    ".opus": "audio/opus",
-    ".webm": "audio/webm",
-    ".mp4": "video/mp4",
-}
-
-TRANSCRIPTION_PROMPT = """\
-Transcribe the following audio file verbatim. Follow these rules:
-
-1. Transcribe every word exactly as spoken — do not summarize or paraphrase.
-2. If there are multiple speakers, label them (e.g., Speaker 1, Speaker 2).
-3. If the language changes mid-conversation, continue transcribing in whatever language is being spoken.
-4. Use punctuation and paragraph breaks to reflect natural pauses and topic shifts.
-5. If a word or phrase is unclear, write [inaudible] in its place.
-6. Do not add any commentary, headers, or metadata — only the transcript.
-"""
+from api_client import DEFAULT_MODEL, transcribe_file
+from extract_audio import extract_audio, is_audio
+from trim_deadspace import trim_deadspace
 
 
-def get_mime_type(file_path: Path) -> str:
-    suffix = file_path.suffix.lower()
-    if suffix in SUPPORTED_AUDIO_TYPES:
-        return SUPPORTED_AUDIO_TYPES[suffix]
-    mime, _ = mimetypes.guess_type(str(file_path))
-    if mime:
-        return mime
-    sys.exit(f"Error: Could not determine MIME type for '{file_path.name}'")
+def run(
+    input_path: Path,
+    output_path: Path | None = None,
+    model: str = DEFAULT_MODEL,
+    silence_threshold: float = -35.0,
+    min_silence_duration: float = 1.5,
+    keep_edge_silence: float = 0.3,
+    skip_trim: bool = False,
+) -> Path:
+    """Extract audio, optionally trim silence, transcribe, and write a .txt file.
 
+    Args:
+        input_path: Path to any audio or video file.
+        output_path: Destination .txt file. Defaults to <input_stem>.txt next to
+                     the input file.
+        model: Gemini model identifier.
+        silence_threshold: dB floor for silence detection (passed to trim_deadspace).
+        min_silence_duration: Minimum silence length in seconds to remove.
+        keep_edge_silence: Seconds of silence to preserve at cut boundaries.
+        skip_trim: If True, skip the trim_deadspace step.
 
-def upload_file(client: genai.Client, file_path: Path, mime_type: str):
-    print(f"Uploading {file_path.name} ({mime_type})...")
-    # Read into a BytesIO with an ASCII-safe name to avoid encoding errors
-    # in HTTP headers (filenames may contain Unicode chars like \u202f).
-    safe_name = file_path.name.encode("ascii", "replace").decode("ascii")
-    buf = io.BytesIO(file_path.read_bytes())
-    buf.name = safe_name
-    uploaded = client.files.upload(file=buf, config={"mime_type": mime_type})
-    print(f"Upload complete: {uploaded.name}")
-    return uploaded
+    Returns:
+        Path to the written transcript file.
+    """
+    if not input_path.exists():
+        sys.exit(f"Error: File not found: {input_path}")
 
+    if output_path is None:
+        output_path = input_path.with_suffix(".txt")
 
-def transcribe(client: genai.Client, uploaded_file, model: str) -> str:
-    print(f"Transcribing with {model}...")
-    response = client.models.generate_content(
-        model=model,
-        contents=[
-            TRANSCRIPTION_PROMPT,
-            uploaded_file,
-        ],
-    )
-    return response.text
+    temp_files: list[Path] = []
+
+    try:
+        # Step 1: extract audio (no-op for pure audio files)
+        audio_path = extract_audio(input_path)
+        if audio_path != input_path:
+            temp_files.append(audio_path)
+
+        # Step 2: trim dead space
+        if skip_trim:
+            trimmed_path = audio_path
+        else:
+            trimmed_path = trim_deadspace(
+                audio_path,
+                silence_threshold=silence_threshold,
+                min_silence_duration=min_silence_duration,
+                keep_edge_silence=keep_edge_silence,
+            )
+            if trimmed_path != audio_path:
+                temp_files.append(trimmed_path)
+
+        # Step 3: transcribe via Gemini API
+        transcript = transcribe_file(trimmed_path, model=model)
+
+    finally:
+        for tmp in temp_files:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    # Write output
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(transcript, encoding="utf-8")
+    except OSError as e:
+        sys.exit(f"Error: Cannot write transcript to '{output_path}': {e}")
+
+    print(f"Transcript written to {output_path}")
+    return output_path
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Transcribe audio using the Gemini API")
-    parser.add_argument("audio_file", type=Path, help="Path to the audio file")
-    parser.add_argument(
-        "--model",
-        default="gemini-2.5-flash",
-        help="Gemini model to use (default: gemini-2.5-flash)",
+    parser = argparse.ArgumentParser(
+        description="Transcribe any audio or video file to text using the Gemini API"
     )
+    parser.add_argument("input_file", type=Path, help="Path to an audio or video file")
     parser.add_argument(
         "--output",
         "-o",
         type=Path,
-        help="Write transcript to a file instead of stdout",
+        help="Output .txt file path (default: <input_name>.txt)",
+    )
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help=f"Gemini model to use (default: {DEFAULT_MODEL})",
+    )
+    parser.add_argument(
+        "--skip-trim",
+        action="store_true",
+        help="Skip the silence-trimming step",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=-35.0,
+        metavar="DB",
+        help="Silence threshold in dB for trimming (default: -35)",
+    )
+    parser.add_argument(
+        "--min-silence",
+        type=float,
+        default=1.5,
+        metavar="SECONDS",
+        help="Minimum silence duration to remove in seconds (default: 1.5)",
+    )
+    parser.add_argument(
+        "--keep-edge",
+        type=float,
+        default=0.3,
+        metavar="SECONDS",
+        help="Seconds of silence to keep at cut boundaries (default: 0.3)",
     )
     args = parser.parse_args()
 
-    if not args.audio_file.exists():
-        sys.exit(f"Error: File not found: {args.audio_file}")
-
-    # Validate output path before making any API calls.
-    if args.output:
-        if args.output.is_dir():
-            sys.exit(f"Error: Output path is a directory: {args.output}")
-        try:
-            args.output.parent.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            sys.exit(f"Error: Cannot create output directory '{args.output.parent}': {e}")
-        try:
-            args.output.touch()
-        except OSError as e:
-            sys.exit(f"Error: Cannot write to '{args.output}': {e}")
-
-    mime_type = get_mime_type(args.audio_file)
-    load_dotenv()  # load .env file if present (e.g. GEMINI_API_KEY)
-    client = genai.Client()  # uses GEMINI_API_KEY env var
-
-    uploaded_file = upload_file(client, args.audio_file, mime_type)
-    transcript = transcribe(client, uploaded_file, args.model)
-
-    if args.output:
-        args.output.write_text(transcript, encoding="utf-8")
-        print(f"Transcript written to {args.output}")
-    else:
-        print("\n--- Transcript ---\n")
-        print(transcript)
+    run(
+        input_path=args.input_file,
+        output_path=args.output,
+        model=args.model,
+        silence_threshold=args.threshold,
+        min_silence_duration=args.min_silence,
+        keep_edge_silence=args.keep_edge,
+        skip_trim=args.skip_trim,
+    )
 
 
 if __name__ == "__main__":
