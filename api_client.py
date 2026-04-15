@@ -30,7 +30,10 @@ Transcribe the following audio file verbatim. Follow these rules:
 1. Transcribe every word exactly as spoken — do not summarize or paraphrase.
 2. If there are multiple speakers, label them (e.g., Speaker 1, Speaker 2).
 3. If the language changes mid-conversation, continue transcribing in whatever language is being spoken.
-4. Use punctuation and paragraph breaks to reflect natural pauses and topic shifts.
+4. Use whitespace to convey timing and cadence:
+   - Add a blank line between speaker turns.
+   - Add two blank lines to represent a notably long pause or a significant shift in topic or energy.
+   - Use paragraph breaks within a single speaker's turn to reflect shorter natural pauses or breath points.
 5. If a word or phrase is unclear, write [inaudible] in its place.
 6. Do not add any commentary, headers, or metadata — only the transcript.
 """
