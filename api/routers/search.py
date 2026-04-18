@@ -17,7 +17,7 @@ def search(
     rows = (
         get_supabase()
         .table("transcriptions")
-        .select("id, filename, text, created_at")
+        .select("id, filename, title, description, text, cleaned, created_at")
         .text_search("search_vec", q)
         .execute()
     )

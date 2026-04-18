@@ -9,7 +9,12 @@ from fastapi.responses import JSONResponse
 
 from api.deps import check_auth, get_supabase
 from transcription_service.extract_audio import extract_audio
-from transcription_service.gemini_client import DEFAULT_MODEL, transcribe_file
+from transcription_service.gemini_client import (
+    DEFAULT_ANALYZE_MODEL,
+    DEFAULT_TRANSCRIBE_MODEL,
+    analyze_transcript,
+    transcribe_raw,
+)
 from transcription_service.trim_deadspace import trim_deadspace
 
 router = APIRouter()
@@ -19,7 +24,8 @@ router = APIRouter()
 async def transcribe(
     file: UploadFile = File(...),
     skip_trim: bool = False,
-    model: str = DEFAULT_MODEL,
+    transcribe_model: str = DEFAULT_TRANSCRIBE_MODEL,
+    analyze_model: str = DEFAULT_ANALYZE_MODEL,
     _: None = Depends(check_auth),
 ):
     suffix = Path(file.filename).suffix if file.filename else ".m4a"
@@ -43,7 +49,8 @@ async def transcribe(
             if trimmed_path != audio_path:
                 temp_files.append(trimmed_path)
 
-        transcript = transcribe_file(trimmed_path, model=model)
+        transcript = transcribe_raw(trimmed_path, model=transcribe_model)
+        analysis = analyze_transcript(transcript, model=analyze_model)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -55,12 +62,26 @@ async def transcribe(
             except OSError:
                 pass
 
+    cleaned = {
+        "light": analysis.cleaned_light,
+        "polished": analysis.cleaned_polished,
+    }
     row = get_supabase().table("transcriptions").insert({
         "filename": filename,
+        "title": analysis.title,
+        "description": analysis.description,
         "text": transcript,
+        "cleaned": cleaned,
     }).execute()
 
-    return JSONResponse({"text": transcript, "id": row.data[0]["id"]})
+    return JSONResponse({
+        "id": row.data[0]["id"],
+        "filename": filename,
+        "title": analysis.title,
+        "description": analysis.description,
+        "text": transcript,
+        "cleaned": cleaned,
+    })
 
 
 @router.get("/transcriptions")
@@ -72,7 +93,7 @@ def list_transcriptions(
     rows = (
         get_supabase()
         .table("transcriptions")
-        .select("id, filename, text, created_at")
+        .select("id, filename, title, description, text, cleaned, created_at")
         .order("created_at", desc=True)
         .range(offset, offset + limit - 1)
         .execute()

@@ -1,41 +1,45 @@
 #!/usr/bin/env python3
-"""Orchestrate audio/video transcription: extract → trim silence → transcribe via Gemini API."""
+"""Orchestrate audio/video transcription: extract → trim silence → transcribe via Gemini API.
+
+Two-pass pipeline:
+  1. Pro model produces a verbatim transcript with speaker labels and whitespace.
+  2. Flash model derives a title, description, and cleaned variants from that transcript.
+
+Writes a JSON sidecar (`<input>.json`) alongside the `.txt` transcript so the polished
+versions and metadata are available without re-running the pipeline.
+"""
 
 import argparse
+import json
 import sys
-import tempfile
 from pathlib import Path
 
-from transcription_service.gemini_client import DEFAULT_MODEL, transcribe_file
-from transcription_service.extract_audio import extract_audio, is_audio
+from transcription_service.gemini_client import (
+    DEFAULT_ANALYZE_MODEL,
+    DEFAULT_TRANSCRIBE_MODEL,
+    analyze_transcript,
+    transcribe_raw,
+)
+from transcription_service.extract_audio import extract_audio
 from transcription_service.trim_deadspace import trim_deadspace
 
 
 def run(
     input_path: Path,
     output_path: Path | None = None,
-    model: str = DEFAULT_MODEL,
+    transcribe_model: str = DEFAULT_TRANSCRIBE_MODEL,
+    analyze_model: str = DEFAULT_ANALYZE_MODEL,
     silence_threshold: float = -35.0,
     min_silence_duration: float = 1.5,
     keep_edge_silence: float = 0.3,
     skip_trim: bool = False,
+    skip_analysis: bool = False,
     lock: bool = False,
 ) -> Path:
-    """Extract audio, optionally trim silence, transcribe, and write a .txt file.
+    """Extract audio, optionally trim silence, transcribe, analyze, and write output files.
 
-    Args:
-        input_path: Path to any audio or video file.
-        output_path: Destination .txt file. Defaults to <input_stem>.txt next to
-                     the input file.
-        model: Gemini model identifier.
-        silence_threshold: dB floor for silence detection (passed to trim_deadspace).
-        min_silence_duration: Minimum silence length in seconds to remove.
-        keep_edge_silence: Seconds of silence to preserve at cut boundaries.
-        skip_trim: If True, skip the trim_deadspace step.
-        lock: If True, make the output file read-only after writing.
-
-    Returns:
-        Path to the written transcript file.
+    Returns the path to the written `.txt` transcript file. When analysis is enabled,
+    a `.json` sidecar with title / description / cleaned variants is written alongside.
     """
     if not input_path.exists():
         sys.exit(f"Error: File not found: {input_path}")
@@ -46,12 +50,10 @@ def run(
     temp_files: list[Path] = []
 
     try:
-        # Step 1: extract audio (no-op for pure audio files)
         audio_path = extract_audio(input_path)
         if audio_path != input_path:
             temp_files.append(audio_path)
 
-        # Step 2: trim dead space
         if skip_trim:
             trimmed_path = audio_path
         else:
@@ -64,8 +66,10 @@ def run(
             if trimmed_path != audio_path:
                 temp_files.append(trimmed_path)
 
-        # Step 3: transcribe via Gemini API
-        transcript = transcribe_file(trimmed_path, model=model)
+        transcript = transcribe_raw(trimmed_path, model=transcribe_model)
+        analysis = None
+        if not skip_analysis:
+            analysis = analyze_transcript(transcript, model=analyze_model)
 
     finally:
         for tmp in temp_files:
@@ -74,7 +78,6 @@ def run(
             except OSError:
                 pass
 
-    # Write output
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(transcript, encoding="utf-8")
@@ -84,6 +87,26 @@ def run(
         sys.exit(f"Error: Cannot write transcript to '{output_path}': {e}")
 
     print(f"Transcript written to {output_path}")
+
+    if analysis is not None:
+        sidecar_path = output_path.with_suffix(".json")
+        payload = {
+            "title": analysis.title,
+            "description": analysis.description,
+            "transcript": transcript,
+            "cleaned": {
+                "light": analysis.cleaned_light,
+                "polished": analysis.cleaned_polished,
+            },
+        }
+        try:
+            sidecar_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            if lock:
+                sidecar_path.chmod(0o444)
+            print(f"Analysis written to {sidecar_path}")
+        except OSError as e:
+            sys.exit(f"Error: Cannot write analysis to '{sidecar_path}': {e}")
+
     return output_path
 
 
@@ -96,22 +119,33 @@ def main():
         "--output",
         "-o",
         type=Path,
-        help="Output .txt file path (default: <input_name>.txt)",
+        help="Output .txt file path (default: <input_name>.txt). A .json sidecar is "
+             "written alongside unless --skip-analysis is set.",
     )
     parser.add_argument(
-        "--model",
-        default=DEFAULT_MODEL,
-        help=f"Gemini model to use (default: {DEFAULT_MODEL})",
+        "--transcribe-model",
+        default=DEFAULT_TRANSCRIBE_MODEL,
+        help=f"Gemini model for transcription (default: {DEFAULT_TRANSCRIBE_MODEL})",
+    )
+    parser.add_argument(
+        "--analyze-model",
+        default=DEFAULT_ANALYZE_MODEL,
+        help=f"Gemini model for analysis pass (default: {DEFAULT_ANALYZE_MODEL})",
     )
     parser.add_argument(
         "--lock",
         action="store_true",
-        help="Make the output file read-only after writing",
+        help="Make the output files read-only after writing",
     )
     parser.add_argument(
         "--skip-trim",
         action="store_true",
         help="Skip the silence-trimming step",
+    )
+    parser.add_argument(
+        "--skip-analysis",
+        action="store_true",
+        help="Skip the second-pass analysis (no title, description, or cleaned versions)",
     )
     parser.add_argument(
         "--threshold",
@@ -139,11 +173,13 @@ def main():
     run(
         input_path=args.input_file,
         output_path=args.output,
-        model=args.model,
+        transcribe_model=args.transcribe_model,
+        analyze_model=args.analyze_model,
         silence_threshold=args.threshold,
         min_silence_duration=args.min_silence,
         keep_edge_silence=args.keep_edge,
         skip_trim=args.skip_trim,
+        skip_analysis=args.skip_analysis,
         lock=args.lock,
     )
 
