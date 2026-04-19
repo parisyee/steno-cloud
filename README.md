@@ -71,7 +71,8 @@ Response:
   "cleaned": {
     "light": "...",
     "polished": "..."
-  }
+  },
+  "created_at": "2026-04-18T12:34:56.789+00:00"
 }
 ```
 
@@ -84,6 +85,14 @@ curl https://steno-836899141951.us-central1.run.app/transcriptions \
 ```
 
 Query params: `limit` (default 20, max 100), `offset` (default 0)
+
+### `DELETE /transcriptions/{id}`
+Delete a transcription by id. Returns `204 No Content` on success, `404` if the id doesn't exist.
+
+```bash
+curl -X DELETE https://steno-836899141951.us-central1.run.app/transcriptions/UUID \
+  -H "Authorization: Bearer YOUR_STENO_API_KEY"
+```
 
 ### `GET /search?q=...`
 Full-text search across `filename`, `title`, `description`, and the raw `text`. Cleaned variants are deliberately excluded from the search index — they're largely redundant with the raw transcript, and a future embedding-based search will not need them either.

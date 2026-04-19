@@ -1,11 +1,11 @@
-"""Transcription endpoints — POST /transcribe, GET /transcriptions."""
+"""Transcription endpoints — POST /transcribe, GET /transcriptions, DELETE /transcriptions/{id}."""
 
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Path as PathParam, Query, UploadFile
 from fastapi import HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from api.deps import check_auth, get_supabase
 from transcription_service.extract_audio import extract_audio
@@ -74,13 +74,15 @@ async def transcribe(
         "cleaned": cleaned,
     }).execute()
 
+    inserted = row.data[0]
     return JSONResponse({
-        "id": row.data[0]["id"],
+        "id": inserted["id"],
         "filename": filename,
         "title": analysis.title,
         "description": analysis.description,
         "text": transcript,
         "cleaned": cleaned,
+        "created_at": inserted["created_at"],
     })
 
 
@@ -99,3 +101,20 @@ def list_transcriptions(
         .execute()
     )
     return JSONResponse({"transcriptions": rows.data})
+
+
+@router.delete("/transcriptions/{transcription_id}")
+def delete_transcription(
+    transcription_id: str = PathParam(..., min_length=1),
+    _: None = Depends(check_auth),
+):
+    result = (
+        get_supabase()
+        .table("transcriptions")
+        .delete()
+        .eq("id", transcription_id)
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Transcription not found")
+    return Response(status_code=204)
