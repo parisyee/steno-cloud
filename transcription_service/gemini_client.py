@@ -79,7 +79,10 @@ You will be given a verbatim transcript with speaker labels and blank-line spaci
 Produce four fields as JSON.
 
 - title: a short sentence (≤10 words) capturing the gist of the conversation.
+  Write it in the same language as the transcript. If the transcript mixes
+  languages, use the language spoken most.
 - description: 2-4 sentences OR 3-5 short bullet points summarizing what's discussed.
+  Use the same language as the title (the transcript's dominant language).
 - cleaned_light: the same transcript with disfluencies removed (um, uh, filler "like" /
   "you know", obvious false starts). Keep every other word verbatim. Preserve speaker
   labels and the blank-line spacing exactly as in the input.
