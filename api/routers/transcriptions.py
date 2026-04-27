@@ -24,6 +24,11 @@ from transcription_service.trim_deadspace import trim_deadspace
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# Cloud Run's managed ingress caps request bodies at 32 MB; 25 MB leaves
+# headroom for multipart overhead. Larger files need the signed-URL/GCS
+# upload path (not yet implemented).
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+
 
 def _record_attempt(
     supabase,
@@ -104,9 +109,17 @@ async def transcribe(
             error_detail=error_detail,
         )
 
+    if file.size is not None and file.size > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File too large. Maximum size is 25 MB.")
+
     try:
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp.write(await file.read())
+            written = 0
+            while chunk := await file.read(1024 * 1024):
+                written += len(chunk)
+                if written > MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="File too large. Maximum size is 25 MB.")
+                tmp.write(chunk)
             input_path = Path(tmp.name)
             temp_files.append(input_path)
 

@@ -9,7 +9,6 @@ Two-pass pipeline:
 """
 
 import argparse
-import io
 import json
 import logging
 import mimetypes
@@ -149,12 +148,14 @@ def get_mime_type(file_path: Path) -> str:
 
 def upload_file(client: genai.Client, file_path: Path, mime_type: str):
     logger.info("uploading %s (%s)", file_path.name, mime_type)
-    # Read into a BytesIO with an ASCII-safe name to avoid encoding errors
-    # in HTTP headers (filenames may contain Unicode chars like \u202f).
+    # Use display_name to pass an ASCII-safe name without loading the whole
+    # file into memory \u2014 avoids encoding errors from Unicode chars like \u202f.
     safe_name = file_path.name.encode("ascii", "replace").decode("ascii")
-    buf = io.BytesIO(file_path.read_bytes())
-    buf.name = safe_name
-    uploaded = client.files.upload(file=buf, config={"mime_type": mime_type})
+    with open(file_path, "rb") as f:
+        uploaded = client.files.upload(
+            file=f,
+            config={"mime_type": mime_type, "display_name": safe_name},
+        )
     logger.info("upload complete: %s", uploaded.name)
     return uploaded
 
