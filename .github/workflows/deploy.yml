@@ -44,8 +44,9 @@ jobs:
             --region ${{ env.REGION }} \
             --platform managed \
             --allow-unauthenticated \
-            --memory 1Gi \
-            --timeout 600 \
+            --use-http2 \
+            --memory 4Gi \
+            --timeout 3600 \
             --set-env-vars "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" \
             --set-env-vars "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" \
             --set-env-vars "SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}" \

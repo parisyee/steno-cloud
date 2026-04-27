@@ -14,20 +14,25 @@ Steno has two interfaces:
 ## System architecture
 
 ```
-iOS (steno-ios) ──────────────────────────────────────────┐
-                                                           ▼
-                                              Cloud Run: steno API
-                                             (FastAPI + ffmpeg + Gemini)
-                                                           │
-                                          ┌────────────────┴────────────────┐
-                                          ▼                                 ▼
-                                  Gemini API                         Supabase (Postgres)
-                               (transcription)                    (transcriptions table)
+iOS (steno-ios) ─────────────┐
+                             │
+Web (steno-nextjs) ──────────┤   HTTP/2 (h2c via Cloud Run --use-http2)
+                             ▼
+                  Cloud Run: steno API
+                 (FastAPI + Hypercorn + ffmpeg + Gemini)
+                             │
+              ┌──────────────┴──────────────┐
+              ▼                             ▼
+         Gemini API                Supabase (Postgres)
+       (transcription)         (transcriptions table)
 ```
+
+The Cloud Run service runs **Hypercorn** (not uvicorn) so the container can speak h2c, and is deployed with `--use-http2` so Cloud Run's front-end forwards HTTP/2 directly to the container. This bypasses the 32 MB request body cap that applies on the HTTP/1.1 forwarding path. Practical upload ceiling is 2 GB (Gemini's File API limit).
 
 ### Repos
 - **`parisyee/steno`** — this repo, the backend API
 - **`parisyee/steno-ios`** — iOS app with Share Extension
+- **`parisyee/steno-nextjs`** — web client (Next.js)
 
 ### Infrastructure
 - **Google Cloud Run** (`steno-prod` project, `us-central1`) — runs the containerized API
@@ -47,7 +52,7 @@ https://steno-836899141951.us-central1.run.app
 All endpoints require a `Bearer` token in the `Authorization` header (set via `STENO_API_KEY` env var). If `STENO_API_KEY` is not set, auth is disabled.
 
 ### `POST /transcribe`
-Upload an audio or video file. Runs the full pipeline (extract → trim silence → transcribe → analyze) and stores the result in Supabase.
+Upload an audio or video file. Runs the full pipeline (extract → trim silence → transcribe → analyze) and stores the result in Supabase. Maximum upload size is 2 GB; uploads are streamed to disk so the server doesn't hold the whole body in memory.
 
 ```bash
 curl -X POST https://steno-836899141951.us-central1.run.app/transcribe \
@@ -147,8 +152,10 @@ Then hit `http://localhost:8080`.
 ### Run the API locally (no Docker)
 
 ```bash
-uv run uvicorn api:app --reload
+uv run hypercorn api.main:app --reload
 ```
+
+Hypercorn is used instead of uvicorn so the container can speak h2c when Cloud Run is deployed with `--use-http2`.
 
 ---
 
@@ -175,8 +182,13 @@ The workflow:
 gcloud run deploy steno \
   --source . \
   --region us-central1 \
-  --project steno-prod
+  --project steno-prod \
+  --use-http2 \
+  --memory 4Gi \
+  --timeout 3600
 ```
+
+`--use-http2` is required for HTTP/2 end-to-end (lifts the 32 MB request body cap). 4 Gi memory and a 3600 s timeout accommodate uploads up to 2 GB.
 
 ---
 
