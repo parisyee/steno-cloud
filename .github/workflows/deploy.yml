@@ -3,6 +3,11 @@ name: Deploy to Cloud Run
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+      - '.dockerignore'
+      - 'LICENSE'
 
 env:
   PROJECT_ID: steno-prod
