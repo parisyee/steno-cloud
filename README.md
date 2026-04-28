@@ -40,6 +40,8 @@ The Cloud Run service runs **Hypercorn** (not uvicorn) so the container can spea
 - **Supabase** — Postgres database for transcription storage and full-text search
 - **GitHub Actions** — builds and deploys to Cloud Run on every push to `main`
 
+> **For provisioning, IAM, and standing up new environments, see [INFRASTRUCTURE.md](./INFRASTRUCTURE.md).** That doc is the runbook for cloud setup; this README focuses on the application itself.
+
 ### Live URL
 ```
 https://steno-836899141951.us-central1.run.app
