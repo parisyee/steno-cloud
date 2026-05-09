@@ -12,6 +12,7 @@ import argparse
 import json
 import logging
 import mimetypes
+import re
 import sys
 from pathlib import Path
 
@@ -274,6 +275,85 @@ def _build_continuation_context(prior_text: str, turns: int = 4) -> str:
     return "\n\n".join(parts[-turns:])
 
 
+_SPEAKER_LABEL_RE = re.compile(r"^Speaker\s+\d+\s*:\s*$")
+
+
+def stitch_chunk_seams(text: str) -> str:
+    """Clean up speaker-label artifacts at chunk boundaries.
+
+    Each chunk is transcribed by an independent Gemini call, so the stitched
+    output occasionally has visible seams:
+
+      1. Adjacent same-speaker turns: a single utterance split across two
+         chunks gets two `Speaker N:` labels (one per chunk's fresh start).
+         The text is correct but the segmentation is wrong — should be one
+         turn with the bodies merged.
+      2. Orphan turns: occasionally the model emits content with no speaker
+         label at all (typically short interjections or a continuation that
+         bled into a new chunk). Best guess is they belong to the previous
+         labeled speaker — that's not always right for short interjections,
+         but it's better than rendering as floating unattributed text.
+
+    This pass merges adjacent same-speaker turns and folds orphans into the
+    preceding turn. It does not modify the textual content of any turn —
+    only the turn-segmentation structure.
+
+    Run AFTER `detect_repetition` (which keys on exact-duplicate turn text;
+    merging would mask legitimate loops by collapsing repeats).
+    """
+    if not text or not text.strip():
+        return text
+
+    raw_turns = [t.strip() for t in text.split("\n\n") if t.strip()]
+    if not raw_turns:
+        return text
+
+    # Parse: extract (label, body) per turn. Label is None for unlabeled orphans.
+    parsed: list[tuple[str | None, str]] = []
+    for turn in raw_turns:
+        lines = turn.split("\n")
+        first = lines[0].strip()
+        if _SPEAKER_LABEL_RE.match(first):
+            label = first
+            body = "\n".join(lines[1:]).strip()
+            parsed.append((label, body))
+        else:
+            parsed.append((None, turn))
+
+    # Walk and merge: an orphan or a same-speaker-as-previous turn folds into
+    # the preceding entry. A leading orphan (nothing before it) stays standalone.
+    merged: list[tuple[str | None, str]] = []
+    merge_count = 0
+    orphan_count = 0
+    for label, body in parsed:
+        if merged and (label is None or label == merged[-1][0]):
+            prev_label, prev_body = merged[-1]
+            joined_body = (
+                f"{prev_body}\n\n{body}" if prev_body and body else (prev_body or body)
+            )
+            merged[-1] = (prev_label, joined_body)
+            if label is None:
+                orphan_count += 1
+            else:
+                merge_count += 1
+        else:
+            merged.append((label, body))
+
+    if merge_count or orphan_count:
+        logger.info(
+            "stitch_chunk_seams: merged %d adjacent same-speaker turns, absorbed %d orphan turns",
+            merge_count, orphan_count,
+        )
+
+    out: list[str] = []
+    for label, body in merged:
+        if label is None:
+            out.append(body)
+        else:
+            out.append(f"{label}\n{body}" if body else label)
+    return "\n\n".join(out)
+
+
 def _generate_chunk_text(
     client: genai.Client,
     file_path: Path,
@@ -430,6 +510,12 @@ def transcribe_raw(file_path: Path, model: str = DEFAULT_TRANSCRIBE_MODEL) -> st
             f"Transcript contains a repetition loop (repeated passage near: {snippet!r}). "
             f"This is usually a Gemini decoding failure on long audio; retry or shorten the input."
         )
+
+    # Final pass: clean chunk-boundary speaker-label artifacts (adjacent
+    # same-speaker turns from independent chunk transcriptions, orphan turns
+    # missing a label). Must run AFTER detect_repetition so loops aren't
+    # masked by the merge step.
+    text = stitch_chunk_seams(text)
 
     logger.info("transcription complete: %d chars", len(text))
     return text
